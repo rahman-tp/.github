@@ -1,0 +1,7 @@
+{
+  "name": "PR Checker Workflow Template",
+  "description": "Runs internal checks on PR creation using org-wide acrgpu runner.",
+  "iconName": "check-circle",
+  "categories": ["Code review", "Continuous integration"],
+  "filePatterns": ["**/*.cs", "**/*.js", "**/*.py"]
+}
