@@ -1,0 +1,45 @@
+# ---
+# name: PR Checker Workflow Template
+# description: Runs internal checks on PR creation using org-wide acrgpu runner.
+# icon: check-circle
+# color: green
+# ---
+
+name: PR Checker
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  check:
+    runs-on: [self-hosted, acrgpu]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run internal curl
+        id: curl_step
+        run: |
+          echo "Running PR check..."
+          RESPONSE=$(curl -k -s http://internal-server/api/check)
+          echo "$RESPONSE" > result.txt
+          echo "response=$RESPONSE" >> $GITHUB_OUTPUT
+          cat result.txt
+
+      - name: Send email (Outlook SMTP)
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.office365.com
+          server_port: 587
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASS }}
+          from: bot@corp.com
+          to: reviewer@corp.com
+          subject: "PR Check Result"
+          body: |
+            Output of PR Check:
+
+            ${{ steps.curl_step.outputs.response }}
+          attachments: result.txt
