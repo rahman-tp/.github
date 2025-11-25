@@ -1,45 +1,267 @@
-# ---
-# name: PR Checker Workflow Template
-# description: Runs internal checks on PR creation using org-wide acrgpu runner.
-# icon: check-circle
-# color: green
-# ---
-
-name: PR Checker
+name: GitHub PR Checker
 
 on:
   pull_request:
     types: [opened, reopened, synchronize]
 
 jobs:
-  check:
+  github-pr-check:
     runs-on: [self-hosted, acrgpu]
 
+    env:
+      # Backend + SMTP
+      BACKEND_PAT: ${{ secrets.BACKEND_PAT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run internal curl
-        id: curl_step
+      # --- Step 0: Debug token (equivalent of SYSTEM_ACCESSTOKEN checks) ---
+      - name: Validate BACKEND_PAT
+        shell: pwsh
         run: |
-          echo "Running PR check..."
-          RESPONSE=$(curl -k -s http://internal-server/api/check)
-          echo "$RESPONSE" > result.txt
-          echo "response=$RESPONSE" >> $GITHUB_OUTPUT
-          cat result.txt
+          if (-not $env:BACKEND_PAT) {
+            Write-Error "❌ BACKEND_PAT is empty—check org/repo secret BACKEND_PAT."
+            exit 1
+          }
 
-      - name: Send email (Outlook SMTP)
-        uses: dawidd6/action-send-mail@v3
+          Write-Host "🔑 BACKEND_PAT loaded (length: $($env:BACKEND_PAT.Length) chars)"
+          $preview = $env:BACKEND_PAT.Substring(0, 4) + "..." + $env:BACKEND_PAT.Substring($env:BACKEND_PAT.Length - 4)
+          Write-Host "🔐 BACKEND_PAT (preview): $preview"
+
+      # --- Step 1: Build PR context + call backend (equivalent to first ADO script) ---
+      - name: Call backend and save artifacts
+        id: backend_call
+        shell: pwsh
+        run: |
+          # GitHub PR context
+          $prNumber   = "${{ github.event.pull_request.number }}"
+          $repo       = "${{ github.repository }}"           # org/repo
+          $repoOwner  = "${{ github.repository_owner }}"
+          $repoName   = "${{ github.event.repository.name }}"
+          $htmlUrl    = "${{ github.event.pull_request.html_url }}"
+          $requester  = "${{ github.event.pull_request.user.login }}"
+          $requesterEmail = "${{ github.event.pull_request.user.email }}"  # often null; keep placeholder
+
+          if (-not $prNumber -or -not $repo -or -not $htmlUrl) {
+            Write-Error "❌ Missing one of: prNumber, repo, htmlUrl."
+            Write-Host "Values: prNumber=$prNumber, repo=$repo, htmlUrl=$htmlUrl"
+            exit 1
+          }
+
+          Write-Host "🔎 PR context:"
+          Write-Host "  Repo:        $repo"
+          Write-Host "  PR number:   $prNumber"
+          Write-Host "  PR URL:      $htmlUrl"
+          Write-Host "  Requester:   $requester"
+
+          # Build repository link similar to ADO, but GitHub-style
+          $repoLink = $htmlUrl   # already the PR link
+
+          # Collect creator + reviewers emails/usernames
+          $creatorLogin = "${{ github.event.pull_request.user.login }}"
+          $creatorEmail = "${{ github.event.pull_request.user.email }}"
+          if (-not $creatorEmail) {
+            $creatorEmail = "$creatorLogin@github.local"  # fallback placeholder
+          }
+
+          $reviewersLogins = @()
+          $reviewersLogins += @(${{
+            toJson(github.event.pull_request.requested_reviewers)
+          }} | ConvertFrom-Json | ForEach-Object { $_.login })
+
+          # Also include requested teams as pseudo emails if needed (optional)
+          $reviewersLogins = $reviewersLogins | Sort-Object -Unique | Where-Object { $_ }
+
+          # For your backend, we want email-like strings.
+          $reviewersEmails = @()
+          foreach ($r in $reviewersLogins) {
+            $reviewersEmails += "$r@github.local"
+          }
+
+          $allEmails = @($creatorEmail) + $reviewersEmails
+          $allEmails = $allEmails | Sort-Object -Unique | Where-Object { $_ -match '^[^@]+@[^@]+\.[^@]+$' }
+
+          $joinedReviewers = $allEmails -join ','
+
+          Write-Host "👤 Creator email: $creatorEmail"
+          Write-Host "👥 Reviewer emails:"
+          foreach ($e in $allEmails) { Write-Host "  • $e" }
+
+          # URL-encode fields (replace spaces only, like original)
+          $encodedRepoLink   = $repoLink  -replace ' ', '%20'
+          $encodedToken      = $env:BACKEND_PAT
+          $encodedRequester  = $requesterEmail -replace ' ', '%20'
+          $encodedReviewers  = $joinedReviewers -replace ' ', '%20'
+          $encodedCreator    = $creatorEmail -replace ' ', '%20'
+
+          # Backend call (github instead of ado)
+          $backendUrl = 'https://10.98.0.97/api/review/github-pr/'
+          Write-Host "📨 Sending PR details to backend at: $backendUrl"
+
+          $result = & curl.exe -k -X POST -sS `
+            -F "repo_link=$encodedRepoLink" `
+            -F "githubpat=$encodedToken" `
+            -F "r_effort=low" `
+            -F "githubemail=$encodedRequester" `
+            -F "prtype=active" `
+            -F "reviewer_emails=$encodedReviewers" `
+            -F "creator_email=$encodedCreator" `
+            $backendUrl
+
+          Write-Host "🌐 Raw backend response: $result"
+
+          # Parse JSON and save artifacts
+          try {
+            $json  = $result | ConvertFrom-Json
+            $runId = $json.run_id
+            if (-not $runId) {
+              Write-Warning "⚠️ Missing run_id. Response:`n$result"
+              exit 1
+            }
+          } catch {
+            Write-Error "❌ JSON parse failed: $($_.Exception.Message)"
+            exit 1
+          }
+
+          $artifactDir = "$(Build.ArtifactStagingDirectory)"
+          if (-not $artifactDir) {
+            $artifactDir = "$env:GITHUB_WORKSPACE\artifacts"
+          }
+
+          if (-not (Test-Path $artifactDir)) {
+            New-Item -ItemType Directory -Path $artifactDir | Out-Null
+          }
+
+          Set-Content -Path "$artifactDir\run_id.txt"        -Value $runId
+          Set-Content -Path "$artifactDir\creator_email.txt" -Value $creatorEmail
+          $allEmails -join "`n" | Set-Content "$artifactDir\all_emails.txt"
+
+          Write-Host "✅ Saved artifacts: run_id.txt, creator_email.txt, all_emails.txt"
+          Write-Host "🎉 Review URL: https://10.98.0.97/#/github-pr/$runId/"
+
+          # Expose values to later steps
+          Write-Output "run_id=$runId"            >> $env:GITHUB_OUTPUT
+          Write-Output "artifactDir=$artifactDir" >> $env:GITHUB_OUTPUT
+
+      # --- Step 2: Post PR comment with review link (equivalent to second ADO script) ---
+      - name: Post PR comment with review URL
+        if: success()
+        uses: actions/github-script@v7
         with:
-          server_address: smtp.office365.com
-          server_port: 587
-          username: ${{ secrets.SMTP_USER }}
-          password: ${{ secrets.SMTP_PASS }}
-          from: bot@corp.com
-          to: reviewer@corp.com
-          subject: "PR Check Result"
-          body: |
-            Output of PR Check:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const runId = `${{ steps.backend_call.outputs.run_id }}`;
+            const reviewUrl = `https://10.98.0.97/#/github-pr/${runId}/`;
+            const prNumber = context.payload.pull_request.number;
 
-            ${{ steps.curl_step.outputs.response }}
-          attachments: result.txt
+            const body = [
+              "**Automated PR Review** is ready!",
+              "",
+              `View it here: ${reviewUrl}`
+            ].join("\n");
+
+            core.info(`Posting PR comment to #${prNumber} with review URL: ${reviewUrl}`);
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body
+            });
+
+      # --- Step 3: Send emails (equivalent to third ADO script) ---
+      - name: Send emails to creator + reviewers
+        if: success()
+        shell: pwsh
+        run: |
+          Write-Host "=== Step 1: Loading variables from artifacts ==="
+          $artifactDir = "${{ steps.backend_call.outputs.artifactDir }}"
+          if (-not $artifactDir) {
+            $artifactDir = "$env:GITHUB_WORKSPACE\artifacts"
+          }
+          Write-Host "Artifact directory: $artifactDir"
+
+          $creator   = Get-Content "$artifactDir\creator_email.txt" -Raw
+          $rawEmails = Get-Content "$artifactDir\all_emails.txt" -Raw
+          $runId     = Get-Content "$artifactDir\run_id.txt" -Raw
+          $prId      = "${{ github.event.pull_request.number }}"
+
+          Write-Host "Creator email loaded: $creator"
+          Write-Host "Raw emails string loaded: '$rawEmails'"
+          Write-Host "Run ID loaded: $runId"
+          Write-Host "PR ID: $prId"
+
+          Write-Host "`n=== Step 2: Validating SMTP environment variables ==="
+          if (-not $env:SMTP_USER) {
+            Write-Error "✖ SMTP_USER is not set; cannot send mail."
+            exit 1
+          } else {
+            Write-Host "SMTP_USER exists: $env:SMTP_USER"
+          }
+
+          if (-not $env:SMTP_PASS) {
+            Write-Error "✖ SMTP_PASS is not set; cannot authenticate."
+            exit 1
+          } else {
+            Write-Host "SMTP_PASS is set (value hidden)"
+          }
+
+          Write-Host "`n=== Step 3: Splitting email list into array ==="
+          $emails = $rawEmails -split '[,;\s]+' | Where-Object { $_ }
+          Write-Host "Parsed email addresses:"
+          foreach ($e in $emails) { Write-Host " • $e" }
+
+          Write-Host "`n=== Step 4: Preparing SMTP credential object ==="
+          $securePass = ConvertTo-SecureString $env:SMTP_PASS -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential($env:SMTP_USER, $securePass)
+          Write-Host "Credential object created for user $($cred.UserName)"
+
+          Write-Host "`n=== Step 5: Building email subject and body ==="
+          $frontendUrl = "https://10.98.0.97/#/github-pr/$runId/"
+          Write-Host "Frontend URL: $frontendUrl"
+
+          $subject = "Automated GitHub PR Review Link for PR #$prId"
+          Write-Host "Email subject: $subject"
+
+          $body = @"
+Hi Team,
+
+The automated code review has been completed for GitHub PR #$prId created by: $creator.
+
+You can view the detailed results here:
+$frontendUrl
+
+Note: Please use Everi Gateway VPN.
+
+Thanks,
+DevOps Pipeline
+"@
+          Write-Host "Email body constructed."
+
+          Write-Host "`n=== Step 6: Sending emails ==="
+          $smtpServer = 'smtp.everi.com'
+          $port       = 25
+          Write-Host "SMTP server: $($smtpServer):$port"
+
+          foreach ($email in $emails) {
+            Write-Host "`n📨 Sending to $($email)..."
+            try {
+              Send-MailMessage `
+                -To         $email `
+                -From       $env:SMTP_USER `
+                -Subject    $subject `
+                -Body       $body `
+                -SmtpServer $smtpServer `
+                -Port       $port `
+                -UseSsl     `
+                -Credential $cred
+              Write-Host "✔ Email successfully sent to $($email)"
+            } catch {
+              Write-Warning "⚠️ Failed sending to $($email): $($_.Exception.Message)"
+            }
+          }
+
+          Write-Host "`nAll done."
