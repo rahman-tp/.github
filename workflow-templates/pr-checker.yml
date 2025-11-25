@@ -8,33 +8,31 @@ jobs:
   github-pr-check:
     runs-on: [self-hosted, acrgpu]
 
-    env:
-      # Backend + SMTP
-      BACKEND_PAT: ${{ secrets.BACKEND_PAT }}
-      SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- Step 0: Debug token (equivalent of SYSTEM_ACCESSTOKEN checks) ---
-      - name: Validate BACKEND_PAT
+      # --- Step 0: Debug GITHUB_TOKEN (for you to verify it is present) ---
+      - name: Validate GITHUB_TOKEN
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if (-not $env:BACKEND_PAT) {
-            Write-Error "❌ BACKEND_PAT is empty—check org/repo secret BACKEND_PAT."
+          if (-not $env:GITHUB_TOKEN) {
+            Write-Error "❌ GITHUB_TOKEN is empty—check that Actions are enabled and permissions are correct."
             exit 1
           }
 
-          Write-Host "🔑 BACKEND_PAT loaded (length: $($env:BACKEND_PAT.Length) chars)"
-          $preview = $env:BACKEND_PAT.Substring(0, 4) + "..." + $env:BACKEND_PAT.Substring($env:BACKEND_PAT.Length - 4)
-          Write-Host "🔐 BACKEND_PAT (preview): $preview"
+          Write-Host "🔑 GITHUB_TOKEN loaded (length: $($env:GITHUB_TOKEN.Length) chars)"
+          $preview = $env:GITHUB_TOKEN.Substring(0, 4) + "..." + $env:GITHUB_TOKEN.Substring($env:GITHUB_TOKEN.Length - 4)
+          Write-Host "🔐 GITHUB_TOKEN (preview): $preview"
 
-      # --- Step 1: Build PR context + call backend (equivalent to first ADO script) ---
+      # --- Step 1: Build PR context + call backend (uses GITHUB_TOKEN) ---
       - name: Call backend and save artifacts
         id: backend_call
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # GitHub PR context
           $prNumber   = "${{ github.event.pull_request.number }}"
@@ -43,7 +41,7 @@ jobs:
           $repoName   = "${{ github.event.repository.name }}"
           $htmlUrl    = "${{ github.event.pull_request.html_url }}"
           $requester  = "${{ github.event.pull_request.user.login }}"
-          $requesterEmail = "${{ github.event.pull_request.user.email }}"  # often null; keep placeholder
+          $requesterEmail = "${{ github.event.pull_request.user.email }}"  # may be null
 
           if (-not $prNumber -or -not $repo -or -not $htmlUrl) {
             Write-Error "❌ Missing one of: prNumber, repo, htmlUrl."
@@ -57,25 +55,22 @@ jobs:
           Write-Host "  PR URL:      $htmlUrl"
           Write-Host "  Requester:   $requester"
 
-          # Build repository link similar to ADO, but GitHub-style
-          $repoLink = $htmlUrl   # already the PR link
+          # Use PR HTML URL as repo link
+          $repoLink = $htmlUrl
 
-          # Collect creator + reviewers emails/usernames
+          # Creator + reviewers
           $creatorLogin = "${{ github.event.pull_request.user.login }}"
           $creatorEmail = "${{ github.event.pull_request.user.email }}"
           if (-not $creatorEmail) {
-            $creatorEmail = "$creatorLogin@github.local"  # fallback placeholder
+            $creatorEmail = "$creatorLogin@github.local"
           }
 
           $reviewersLogins = @()
           $reviewersLogins += @(${{
             toJson(github.event.pull_request.requested_reviewers)
           }} | ConvertFrom-Json | ForEach-Object { $_.login })
-
-          # Also include requested teams as pseudo emails if needed (optional)
           $reviewersLogins = $reviewersLogins | Sort-Object -Unique | Where-Object { $_ }
 
-          # For your backend, we want email-like strings.
           $reviewersEmails = @()
           foreach ($r in $reviewersLogins) {
             $reviewersEmails += "$r@github.local"
@@ -90,14 +85,13 @@ jobs:
           Write-Host "👥 Reviewer emails:"
           foreach ($e in $allEmails) { Write-Host "  • $e" }
 
-          # URL-encode fields (replace spaces only, like original)
+          # Encode fields (spaces -> %20)
           $encodedRepoLink   = $repoLink  -replace ' ', '%20'
-          $encodedToken      = $env:BACKEND_PAT
+          $encodedToken      = $env:GITHUB_TOKEN
           $encodedRequester  = $requesterEmail -replace ' ', '%20'
           $encodedReviewers  = $joinedReviewers -replace ' ', '%20'
           $encodedCreator    = $creatorEmail -replace ' ', '%20'
 
-          # Backend call (github instead of ado)
           $backendUrl = 'https://10.98.0.97/api/review/github-pr/'
           Write-Host "📨 Sending PR details to backend at: $backendUrl"
 
@@ -113,7 +107,6 @@ jobs:
 
           Write-Host "🌐 Raw backend response: $result"
 
-          # Parse JSON and save artifacts
           try {
             $json  = $result | ConvertFrom-Json
             $runId = $json.run_id
@@ -126,11 +119,7 @@ jobs:
             exit 1
           }
 
-          $artifactDir = "$(Build.ArtifactStagingDirectory)"
-          if (-not $artifactDir) {
-            $artifactDir = "$env:GITHUB_WORKSPACE\artifacts"
-          }
-
+          $artifactDir = "$env:GITHUB_WORKSPACE\artifacts"
           if (-not (Test-Path $artifactDir)) {
             New-Item -ItemType Directory -Path $artifactDir | Out-Null
           }
@@ -142,11 +131,10 @@ jobs:
           Write-Host "✅ Saved artifacts: run_id.txt, creator_email.txt, all_emails.txt"
           Write-Host "🎉 Review URL: https://10.98.0.97/#/github-pr/$runId/"
 
-          # Expose values to later steps
           Write-Output "run_id=$runId"            >> $env:GITHUB_OUTPUT
           Write-Output "artifactDir=$artifactDir" >> $env:GITHUB_OUTPUT
 
-      # --- Step 2: Post PR comment with review link (equivalent to second ADO script) ---
+      # --- Step 2: PR comment using GITHUB_TOKEN (unchanged) ---
       - name: Post PR comment with review URL
         if: success()
         uses: actions/github-script@v7
@@ -172,10 +160,13 @@ jobs:
               body
             });
 
-      # --- Step 3: Send emails (equivalent to third ADO script) ---
+      # --- Step 3: Email step (same as before, uses SMTP_USER/SMTP_PASS) ---
       - name: Send emails to creator + reviewers
         if: success()
         shell: pwsh
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
         run: |
           Write-Host "=== Step 1: Loading variables from artifacts ==="
           $artifactDir = "${{ steps.backend_call.outputs.artifactDir }}"
