@@ -1,7 +1,12 @@
 {
-  "name": "PR Checker Workflow Template",
-  "description": "Runs internal checks on PR creation using org-wide acrgpu runner.",
+  "name": "GitHub PR Checker (acrgpu)",
+  "description": "On every pull request, sends PR context to the internal GitHub PR review backend, posts a review link comment, and emails the creator/reviewers using the org-wide acrgpu runner.",
   "iconName": "check-circle",
-  "categories": ["Code review", "Continuous integration"],
-  "filePatterns": ["**/*.cs", "**/*.js", "**/*.py"]
+  "categories": [
+    "Code review",
+    "Continuous integration"
+  ],
+  "filePatterns": [
+    "**/*",
+  ]
 }
