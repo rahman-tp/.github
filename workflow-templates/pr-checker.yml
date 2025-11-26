@@ -83,7 +83,7 @@ jobs:
           $encodedCreatorEmail  = $creatorEmail -replace ' ', '%20'
           $encodedCreatorLogin  = $creatorLogin -replace ' ', '%20'
 
-          $backendUrl = 'https://10.98.0.97/api/review/github-pr/'
+          $backendUrl = 'https://10.100.48.16/api/review/github-pr/'
           Write-Host "📨 Sending PR details to backend at: $backendUrl"
 
           $result = & curl.exe -k -X POST -sS `
@@ -122,7 +122,7 @@ jobs:
           $reviewers -join "`n" | Set-Content "$artifactDir\all_reviewers.txt"
 
           Write-Host "✅ Saved artifacts: run_id.txt, creator.txt, all_reviewers.txt"
-          Write-Host "🎉 Review URL: https://10.98.0.97/#/git-pr/$runId/"
+          Write-Host "🎉 Review URL: https://10.100.48.16/#/git-pr/$runId/"
 
           Write-Output "run_id=$runId"            >> $env:GITHUB_OUTPUT
           Write-Output "artifactDir=$artifactDir" >> $env:GITHUB_OUTPUT
@@ -135,7 +135,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const runId = `${{ steps.backend_call.outputs.run_id }}`;
-            const reviewUrl = `https://10.98.0.97/#/git-pr/${runId}/`;
+            const reviewUrl = `https://10.100.48.16/#/git-pr/${runId}/`;
             const prNumber = context.payload.pull_request.number;
 
             const body = [
