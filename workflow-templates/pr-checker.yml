@@ -23,7 +23,7 @@ jobs:
 
       # --- Step 0: Debug GITHUB_TOKEN (for you to verify it is present) ---
       - name: Validate GITHUB_TOKEN
-        shell: pwsh
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -39,7 +39,7 @@ jobs:
       # --- Step 1: Build PR context + call backend (uses GITHUB_TOKEN) ---
       - name: Call backend and save artifacts
         id: backend_call
-        shell: pwsh
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
