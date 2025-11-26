@@ -1,5 +1,7 @@
 name: GitHub PR Checker
-
+permissions:
+  contents: read
+  pull-requests: write
 on:
   pull_request:
     types: [opened, reopened, synchronize]
@@ -58,7 +60,7 @@ jobs:
           # Use PR HTML URL as repo link
           $repoLink = $htmlUrl
 
-          # Creator + reviewers
+          # Creator + reviewers from event (for logging)
           $creatorLogin = "${{ github.event.pull_request.user.login }}"
           $creatorEmail = "${{ github.event.pull_request.user.email }}"
           if (-not $creatorEmail) {
@@ -71,38 +73,26 @@ jobs:
           }} | ConvertFrom-Json | ForEach-Object { $_.login })
           $reviewersLogins = $reviewersLogins | Sort-Object -Unique | Where-Object { $_ }
 
-          $reviewersEmails = @()
-          foreach ($r in $reviewersLogins) {
-            $reviewersEmails += "$r@github.local"
-          }
-
-          $allEmails = @($creatorEmail) + $reviewersEmails
-          $allEmails = $allEmails | Sort-Object -Unique | Where-Object { $_ -match '^[^@]+@[^@]+\.[^@]+$' }
-
-          $joinedReviewers = $allEmails -join ','
-
           Write-Host "👤 Creator email: $creatorEmail"
-          Write-Host "👥 Reviewer emails:"
-          foreach ($e in $allEmails) { Write-Host "  • $e" }
+          Write-Host "👥 Reviewer logins:"
+          foreach ($r in $reviewersLogins) { Write-Host "  • $r" }
 
           # Encode fields (spaces -> %20)
           $encodedRepoLink   = $repoLink  -replace ' ', '%20'
           $encodedToken      = $env:GITHUB_TOKEN
-          $encodedRequester  = $requesterEmail -replace ' ', '%20'
-          $encodedReviewers  = $joinedReviewers -replace ' ', '%20'
-          $encodedCreator    = $creatorEmail -replace ' ', '%20'
+          $encodedCreatorEmail  = $creatorEmail -replace ' ', '%20'
+          $encodedCreatorLogin  = $creatorLogin -replace ' ', '%20'
 
           $backendUrl = 'https://10.98.0.97/api/review/github-pr/'
           Write-Host "📨 Sending PR details to backend at: $backendUrl"
 
           $result = & curl.exe -k -X POST -sS `
             -F "repo_link=$encodedRepoLink" `
-            -F "githubpat=$encodedToken" `
+            -F "triggerPat=$encodedToken" `
             -F "r_effort=low" `
-            -F "githubemail=$encodedRequester" `
+            -F "email=$encodedCreatorEmail" `
+            -F "gitUser=$encodedCreatorLogin" `
             -F "prtype=active" `
-            -F "reviewer_emails=$encodedReviewers" `
-            -F "creator_email=$encodedCreator" `
             $backendUrl
 
           Write-Host "🌐 Raw backend response: $result"
@@ -110,6 +100,8 @@ jobs:
           try {
             $json  = $result | ConvertFrom-Json
             $runId = $json.run_id
+            $creator = $json.developer   # Creator extracted from response JSON
+            $reviewers = $json.reviewers
             if (-not $runId) {
               Write-Warning "⚠️ Missing run_id. Response:`n$result"
               exit 1
@@ -124,17 +116,18 @@ jobs:
             New-Item -ItemType Directory -Path $artifactDir | Out-Null
           }
 
-          Set-Content -Path "$artifactDir\run_id.txt"        -Value $runId
-          Set-Content -Path "$artifactDir\creator_email.txt" -Value $creatorEmail
-          $allEmails -join "`n" | Set-Content "$artifactDir\all_emails.txt"
+          Set-Content -Path "$artifactDir\run_id.txt"    -Value $runId
+          Set-Content -Path "$artifactDir\creator.txt"   -Value $creator
+          # Save reviewers array as newline separated string
+          $reviewers -join "`n" | Set-Content "$artifactDir\all_reviewers.txt"
 
-          Write-Host "✅ Saved artifacts: run_id.txt, creator_email.txt, all_emails.txt"
-          Write-Host "🎉 Review URL: https://10.98.0.97/#/github-pr/$runId/"
+          Write-Host "✅ Saved artifacts: run_id.txt, creator.txt, all_reviewers.txt"
+          Write-Host "🎉 Review URL: https://10.98.0.97/#/git-pr/$runId/"
 
           Write-Output "run_id=$runId"            >> $env:GITHUB_OUTPUT
           Write-Output "artifactDir=$artifactDir" >> $env:GITHUB_OUTPUT
 
-      # --- Step 2: PR comment using GITHUB_TOKEN (unchanged) ---
+      # --- Step 2: PR comment using GITHUB_TOKEN ---
       - name: Post PR comment with review URL
         if: success()
         uses: actions/github-script@v7
@@ -142,7 +135,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const runId = `${{ steps.backend_call.outputs.run_id }}`;
-            const reviewUrl = `https://10.98.0.97/#/github-pr/${runId}/`;
+            const reviewUrl = `https://10.98.0.97/#/git-pr/${runId}/`;
             const prNumber = context.payload.pull_request.number;
 
             const body = [
@@ -160,99 +153,4 @@ jobs:
               body
             });
 
-      # --- Step 3: Email step (same as before, uses SMTP_USER/SMTP_PASS) ---
-      - name: Send emails to creator + reviewers
-        if: success()
-        shell: pwsh
-        env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-        run: |
-          Write-Host "=== Step 1: Loading variables from artifacts ==="
-          $artifactDir = "${{ steps.backend_call.outputs.artifactDir }}"
-          if (-not $artifactDir) {
-            $artifactDir = "$env:GITHUB_WORKSPACE\artifacts"
-          }
-          Write-Host "Artifact directory: $artifactDir"
 
-          $creator   = Get-Content "$artifactDir\creator_email.txt" -Raw
-          $rawEmails = Get-Content "$artifactDir\all_emails.txt" -Raw
-          $runId     = Get-Content "$artifactDir\run_id.txt" -Raw
-          $prId      = "${{ github.event.pull_request.number }}"
-
-          Write-Host "Creator email loaded: $creator"
-          Write-Host "Raw emails string loaded: '$rawEmails'"
-          Write-Host "Run ID loaded: $runId"
-          Write-Host "PR ID: $prId"
-
-          Write-Host "`n=== Step 2: Validating SMTP environment variables ==="
-          if (-not $env:SMTP_USER) {
-            Write-Error "✖ SMTP_USER is not set; cannot send mail."
-            exit 1
-          } else {
-            Write-Host "SMTP_USER exists: $env:SMTP_USER"
-          }
-
-          if (-not $env:SMTP_PASS) {
-            Write-Error "✖ SMTP_PASS is not set; cannot authenticate."
-            exit 1
-          } else {
-            Write-Host "SMTP_PASS is set (value hidden)"
-          }
-
-          Write-Host "`n=== Step 3: Splitting email list into array ==="
-          $emails = $rawEmails -split '[,;\s]+' | Where-Object { $_ }
-          Write-Host "Parsed email addresses:"
-          foreach ($e in $emails) { Write-Host " • $e" }
-
-          Write-Host "`n=== Step 4: Preparing SMTP credential object ==="
-          $securePass = ConvertTo-SecureString $env:SMTP_PASS -AsPlainText -Force
-          $cred = New-Object System.Management.Automation.PSCredential($env:SMTP_USER, $securePass)
-          Write-Host "Credential object created for user $($cred.UserName)"
-
-          Write-Host "`n=== Step 5: Building email subject and body ==="
-          $frontendUrl = "https://10.98.0.97/#/github-pr/$runId/"
-          Write-Host "Frontend URL: $frontendUrl"
-
-          $subject = "Automated GitHub PR Review Link for PR #$prId"
-          Write-Host "Email subject: $subject"
-
-          $body = @"
-Hi Team,
-
-The automated code review has been completed for GitHub PR #$prId created by: $creator.
-
-You can view the detailed results here:
-$frontendUrl
-
-Note: Please use Everi Gateway VPN.
-
-Thanks,
-DevOps Pipeline
-"@
-          Write-Host "Email body constructed."
-
-          Write-Host "`n=== Step 6: Sending emails ==="
-          $smtpServer = 'smtp.everi.com'
-          $port       = 25
-          Write-Host "SMTP server: $($smtpServer):$port"
-
-          foreach ($email in $emails) {
-            Write-Host "`n📨 Sending to $($email)..."
-            try {
-              Send-MailMessage `
-                -To         $email `
-                -From       $env:SMTP_USER `
-                -Subject    $subject `
-                -Body       $body `
-                -SmtpServer $smtpServer `
-                -Port       $port `
-                -UseSsl     `
-                -Credential $cred
-              Write-Host "✔ Email successfully sent to $($email)"
-            } catch {
-              Write-Warning "⚠️ Failed sending to $($email): $($_.Exception.Message)"
-            }
-          }
-
-          Write-Host "`nAll done."
