@@ -5,41 +5,158 @@
 # color: green
 # ---
 
-name: PR Checker
-
+name: GitHub PR Checker
+permissions:
+  contents: read
+  pull-requests: write
 on:
   pull_request:
     types: [opened, reopened, synchronize]
 
 jobs:
-  check:
+  github-pr-check:
     runs-on: [self-hosted, acrgpu]
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run internal curl
-        id: curl_step
+      # --- Step 0: Debug GITHUB_TOKEN (for you to verify it is present) ---
+      - name: Validate GITHUB_TOKEN
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Running PR check..."
-          RESPONSE=$(curl -k -s http://internal-server/api/check)
-          echo "$RESPONSE" > result.txt
-          echo "response=$RESPONSE" >> $GITHUB_OUTPUT
-          cat result.txt
+          if (-not $env:GITHUB_TOKEN) {
+            Write-Error "❌ GITHUB_TOKEN is empty—check that Actions are enabled and permissions are correct."
+            exit 1
+          }
 
-      - name: Send email (Outlook SMTP)
-        uses: dawidd6/action-send-mail@v3
+          Write-Host "🔑 GITHUB_TOKEN loaded (length: $($env:GITHUB_TOKEN.Length) chars)"
+          $preview = $env:GITHUB_TOKEN.Substring(0, 4) + "..." + $env:GITHUB_TOKEN.Substring($env:GITHUB_TOKEN.Length - 4)
+          Write-Host "🔐 GITHUB_TOKEN (preview): $preview"
+
+      # --- Step 1: Build PR context + call backend (uses GITHUB_TOKEN) ---
+      - name: Call backend and save artifacts
+        id: backend_call
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # GitHub PR context
+          $prNumber   = "${{ github.event.pull_request.number }}"
+          $repo       = "${{ github.repository }}"           # org/repo
+          $repoOwner  = "${{ github.repository_owner }}"
+          $repoName   = "${{ github.event.repository.name }}"
+          $htmlUrl    = "${{ github.event.pull_request.html_url }}"
+          $requester  = "${{ github.event.pull_request.user.login }}"
+          $requesterEmail = "${{ github.event.pull_request.user.email }}"  # may be null
+
+          if (-not $prNumber -or -not $repo -or -not $htmlUrl) {
+            Write-Error "❌ Missing one of: prNumber, repo, htmlUrl."
+            Write-Host "Values: prNumber=$prNumber, repo=$repo, htmlUrl=$htmlUrl"
+            exit 1
+          }
+
+          Write-Host "🔎 PR context:"
+          Write-Host "  Repo:        $repo"
+          Write-Host "  PR number:   $prNumber"
+          Write-Host "  PR URL:      $htmlUrl"
+          Write-Host "  Requester:   $requester"
+
+          # Use PR HTML URL as repo link
+          $repoLink = $htmlUrl
+
+          # Creator + reviewers from event (for logging)
+          $creatorLogin = "${{ github.event.pull_request.user.login }}"
+          $creatorEmail = "${{ github.event.pull_request.user.email }}"
+          if (-not $creatorEmail) {
+            $creatorEmail = "$creatorLogin@github.local"
+          }
+
+          $reviewersLogins = @()
+          $reviewersLogins += @(${{
+            toJson(github.event.pull_request.requested_reviewers)
+          }} | ConvertFrom-Json | ForEach-Object { $_.login })
+          $reviewersLogins = $reviewersLogins | Sort-Object -Unique | Where-Object { $_ }
+
+          Write-Host "👤 Creator email: $creatorEmail"
+          Write-Host "👥 Reviewer logins:"
+          foreach ($r in $reviewersLogins) { Write-Host "  • $r" }
+
+          # Encode fields (spaces -> %20)
+          $encodedRepoLink   = $repoLink  -replace ' ', '%20'
+          $encodedToken      = $env:GITHUB_TOKEN
+          $encodedCreatorEmail  = $creatorEmail -replace ' ', '%20'
+          $encodedCreatorLogin  = $creatorLogin -replace ' ', '%20'
+
+          $backendUrl = 'https://10.100.48.16/api/review/github-pr/'
+          Write-Host "📨 Sending PR details to backend at: $backendUrl"
+
+          $result = & curl.exe -k -X POST -sS `
+            -F "repo_link=$encodedRepoLink" `
+            -F "triggerPat=$encodedToken" `
+            -F "r_effort=low" `
+            -F "email=$encodedCreatorEmail" `
+            -F "gitUser=$encodedCreatorLogin" `
+            -F "prtype=active" `
+            $backendUrl
+
+          Write-Host "🌐 Raw backend response: $result"
+
+          try {
+            $json  = $result | ConvertFrom-Json
+            $runId = $json.run_id
+            $creator = $json.developer   # Creator extracted from response JSON
+            $reviewers = $json.reviewers
+            if (-not $runId) {
+              Write-Warning "⚠️ Missing run_id. Response:`n$result"
+              exit 1
+            }
+          } catch {
+            Write-Error "❌ JSON parse failed: $($_.Exception.Message)"
+            exit 1
+          }
+
+          $artifactDir = "$env:GITHUB_WORKSPACE\artifacts"
+          if (-not (Test-Path $artifactDir)) {
+            New-Item -ItemType Directory -Path $artifactDir | Out-Null
+          }
+
+          Set-Content -Path "$artifactDir\run_id.txt"    -Value $runId
+          Set-Content -Path "$artifactDir\creator.txt"   -Value $creator
+          # Save reviewers array as newline separated string
+          $reviewers -join "`n" | Set-Content "$artifactDir\all_reviewers.txt"
+
+          Write-Host "✅ Saved artifacts: run_id.txt, creator.txt, all_reviewers.txt"
+          Write-Host "🎉 Review URL: https://10.100.48.16/#/git-pr/$runId/"
+
+          Write-Output "run_id=$runId"            >> $env:GITHUB_OUTPUT
+          Write-Output "artifactDir=$artifactDir" >> $env:GITHUB_OUTPUT
+
+      # --- Step 2: PR comment using GITHUB_TOKEN ---
+      - name: Post PR comment with review URL
+        if: success()
+        uses: actions/github-script@v7
         with:
-          server_address: smtp.office365.com
-          server_port: 587
-          username: ${{ secrets.SMTP_USER }}
-          password: ${{ secrets.SMTP_PASS }}
-          from: bot@corp.com
-          to: reviewer@corp.com
-          subject: "PR Check Result"
-          body: |
-            Output of PR Check:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const runId = `${{ steps.backend_call.outputs.run_id }}`;
+            const reviewUrl = `https://10.100.48.16/#/git-pr/${runId}/`;
+            const prNumber = context.payload.pull_request.number;
 
-            ${{ steps.curl_step.outputs.response }}
-          attachments: result.txt
+            const body = [
+              "**Automated PR Review** is ready!",
+              "",
+              `View it here: ${reviewUrl}`
+            ].join("\n");
+
+            core.info(`Posting PR comment to #${prNumber} with review URL: ${reviewUrl}`);
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body
+            });
+
