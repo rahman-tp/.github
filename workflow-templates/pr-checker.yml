@@ -93,7 +93,7 @@ jobs:
           encoded_creator_email="${creator_email// /%20}"
           encoded_creator_login="${CREATOR_LOGIN// /%20}"
 
-          backend_url='https://10.100.48.16/api/review/github-pr/'
+          backend_url='https://10.100.48.16/api/review/git-pr/'
           echo "📨 Sending PR details to backend at: $backend_url"
 
           # Send POST request with form data to backend
