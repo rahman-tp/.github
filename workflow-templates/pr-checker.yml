@@ -4,7 +4,6 @@
 # icon: check-circle
 # color: green
 # ---
-
 name: GitHub PR Checker
 permissions:
   contents: read
@@ -18,121 +17,120 @@ jobs:
     runs-on: [self-hosted, acr]
 
     steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- Step 0: Debug GITHUB_TOKEN (for you to verify it is present) ---
+      # --- Step 0: Debug GITHUB_TOKEN (bash version) ---
       - name: Validate GITHUB_TOKEN
-        shell: powershell
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if (-not $env:GITHUB_TOKEN) {
-            Write-Error "❌ GITHUB_TOKEN is empty—check that Actions are enabled and permissions are correct."
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "❌ GITHUB_TOKEN is empty—check that Actions are enabled and permissions are correct."
             exit 1
-          }
+          fi
 
-          Write-Host "🔑 GITHUB_TOKEN loaded (length: $($env:GITHUB_TOKEN.Length) chars)"
-          $preview = $env:GITHUB_TOKEN.Substring(0, 4) + "..." + $env:GITHUB_TOKEN.Substring($env:GITHUB_TOKEN.Length - 4)
-          Write-Host "🔐 GITHUB_TOKEN (preview): $preview"
+          echo "🔑 GITHUB_TOKEN loaded (length: ${#GITHUB_TOKEN} chars)"
+          preview="${GITHUB_TOKEN:0:4}...${GITHUB_TOKEN: -4}"
+          echo "🔐 GITHUB_TOKEN (preview): $preview"
 
-      # --- Step 1: Build PR context + call backend (uses GITHUB_TOKEN) ---
+      # --- Step 1: Build PR context + call backend (bash version) ---
       - name: Call backend and save artifacts
         id: backend_call
-        shell: powershell
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HTML_URL: ${{ github.event.pull_request.html_url }}
+          REQUESTER_LOGIN: ${{ github.event.pull_request.user.login }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          CREATOR_LOGIN: ${{ github.event.pull_request.user.login }}
+          CREATOR_EMAIL: ${{ github.event.pull_request.user.email }}
+          REQUESTED_REVIEWERS: ${{ toJson(github.event.pull_request.requested_reviewers) }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
-          # GitHub PR context
-          $prNumber   = "${{ github.event.pull_request.number }}"
-          $repo       = "${{ github.repository }}"           # org/repo
-          $repoOwner  = "${{ github.repository_owner }}"
-          $repoName   = "${{ github.event.repository.name }}"
-          $htmlUrl    = "${{ github.event.pull_request.html_url }}"
-          $requester  = "${{ github.event.pull_request.user.login }}"
-          $requesterEmail = "${{ github.event.pull_request.user.email }}"  # may be null
-
-          if (-not $prNumber -or -not $repo -or -not $htmlUrl) {
-            Write-Error "❌ Missing one of: prNumber, repo, htmlUrl."
-            Write-Host "Values: prNumber=$prNumber, repo=$repo, htmlUrl=$htmlUrl"
+          # Check required context variables
+          if [ -z "$PR_NUMBER" ] || [ -z "$GITHUB_REPOSITORY" ] || [ -z "$PR_HTML_URL" ]; then
+            echo "❌ Missing one of: PR_NUMBER, GITHUB_REPOSITORY, PR_HTML_URL."
+            echo "Values: PR_NUMBER=$PR_NUMBER, GITHUB_REPOSITORY=$GITHUB_REPOSITORY, PR_HTML_URL=$PR_HTML_URL"
             exit 1
-          }
+          fi
 
-          Write-Host "🔎 PR context:"
-          Write-Host "  Repo:        $repo"
-          Write-Host "  PR number:   $prNumber"
-          Write-Host "  PR URL:      $htmlUrl"
-          Write-Host "  Requester:   $requester"
+          echo "🔎 PR context:"
+          echo "  Repo:        $GITHUB_REPOSITORY"
+          echo "  PR number:   $PR_NUMBER"
+          echo "  PR URL:      $PR_HTML_URL"
+          echo "  Requester:   $REQUESTER_LOGIN"
 
-          # Use PR HTML URL as repo link
-          $repoLink = $htmlUrl
+          repo_link="$PR_HTML_URL"
 
-          # Creator + reviewers from event (for logging)
-          $creatorLogin = "${{ github.event.pull_request.user.login }}"
-          $creatorEmail = "${{ github.event.pull_request.user.email }}"
-          if (-not $creatorEmail) {
-            $creatorEmail = "$creatorLogin@github.local"
-          }
+          creator_email="$CREATOR_EMAIL"
+          if [ -z "$creator_email" ]; then
+            creator_email="${CREATOR_LOGIN}@github.local"
+          fi
 
-          $reviewersLogins = @()
-          $reviewersLogins += @(${{
-            toJson(github.event.pull_request.requested_reviewers)
-          }} | ConvertFrom-Json | ForEach-Object { $_.login })
-          $reviewersLogins = $reviewersLogins | Sort-Object -Unique | Where-Object { $_ }
+          echo "👤 Creator email: $creator_email"
 
-          Write-Host "👤 Creator email: $creatorEmail"
-          Write-Host "👥 Reviewer logins:"
-          foreach ($r in $reviewersLogins) { Write-Host "  • $r" }
+          # Extract reviewer logins from JSON array
+          reviewers_logins=$(echo "$REQUESTED_REVIEWERS" | jq -r '.[].login' 2>/dev/null | sort -u)
+          if [ -z "$reviewers_logins" ]; then
+            echo "👥 Reviewer logins: None"
+          else
+            echo "👥 Reviewer logins:"
+            echo "$reviewers_logins" | while read -r reviewer; do
+              echo "  • $reviewer"
+            done
+          fi
 
-          # Encode fields (spaces -> %20)
-          $encodedRepoLink   = $repoLink  -replace ' ', '%20'
-          $encodedToken      = $env:GITHUB_TOKEN
-          $encodedCreatorEmail  = $creatorEmail -replace ' ', '%20'
-          $encodedCreatorLogin  = $creatorLogin -replace ' ', '%20'
+          # Encode fields by URL encoding spaces (%20), more encoding can be added if needed
+          encoded_repo_link="${repo_link// /%20}"
+          encoded_token="$GITHUB_TOKEN"
+          encoded_creator_email="${creator_email// /%20}"
+          encoded_creator_login="${CREATOR_LOGIN// /%20}"
 
-          $backendUrl = 'https://10.100.48.16/api/review/github-pr/'
-          Write-Host "📨 Sending PR details to backend at: $backendUrl"
+          backend_url='https://10.100.48.16/api/review/github-pr/'
+          echo "📨 Sending PR details to backend at: $backend_url"
 
-          $result = & curl.exe -k -X POST -sS `
-            -F "repo_link=$encodedRepoLink" `
-            -F "triggerPat=$encodedToken" `
-            -F "r_effort=low" `
-            -F "email=$encodedCreatorEmail" `
-            -F "gitUser=$encodedCreatorLogin" `
-            -F "prtype=active" `
-            $backendUrl
+          # Send POST request with form data to backend
+          result=$(curl -k -X POST -sS \
+            -F "repo_link=$encoded_repo_link" \
+            -F "triggerPat=$encoded_token" \
+            -F "r_effort=low" \
+            -F "email=$encoded_creator_email" \
+            -F "gitUser=$encoded_creator_login" \
+            -F "prtype=active" \
+            "$backend_url")
 
-          Write-Host "🌐 Raw backend response: $result"
+          echo "🌐 Raw backend response: $result"
 
-          try {
-            $json  = $result | ConvertFrom-Json
-            $runId = $json.run_id
-            $creator = $json.developer   # Creator extracted from response JSON
-            $reviewers = $json.reviewers
-            if (-not $runId) {
-              Write-Warning "⚠️ Missing run_id. Response:`n$result"
-              exit 1
-            }
-          } catch {
-            Write-Error "❌ JSON parse failed: $($_.Exception.Message)"
+          # Parse JSON response
+          run_id=$(echo "$result" | jq -r '.run_id' 2>/dev/null)
+          creator=$(echo "$result" | jq -r '.developer' 2>/dev/null)
+          reviewers=$(echo "$result" | jq -r '.reviewers | join("\n")' 2>/dev/null)
+
+          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+            echo "⚠️ Missing run_id. Response:"
+            echo "$result"
             exit 1
-          }
+          fi
 
-          $artifactDir = "$env:GITHUB_WORKSPACE\artifacts"
-          if (-not (Test-Path $artifactDir)) {
-            New-Item -ItemType Directory -Path $artifactDir | Out-Null
-          }
+          artifact_dir="$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$artifact_dir"
 
-          Set-Content -Path "$artifactDir\run_id.txt"    -Value $runId
-          Set-Content -Path "$artifactDir\creator.txt"   -Value $creator
-          # Save reviewers array as newline separated string
-          $reviewers -join "`n" | Set-Content "$artifactDir\all_reviewers.txt"
+          echo "$run_id" > "$artifact_dir/run_id.txt"
+          echo "$creator" > "$artifact_dir/creator.txt"
+          echo "$reviewers" > "$artifact_dir/all_reviewers.txt"
 
-          Write-Host "✅ Saved artifacts: run_id.txt, creator.txt, all_reviewers.txt"
-          Write-Host "🎉 Review URL: https://10.100.48.16/#/git-pr/$runId/"
+          echo "✅ Saved artifacts: run_id.txt, creator.txt, all_reviewers.txt"
+          echo "🎉 Review URL: https://10.100.48.16/#/git-pr/$run_id/"
 
-          Write-Output "run_id=$runId"            >> $env:GITHUB_OUTPUT
-          Write-Output "artifactDir=$artifactDir" >> $env:GITHUB_OUTPUT
+          echo "run_id=$run_id" >> $GITHUB_OUTPUT
+          echo "artifactDir=$artifact_dir" >> $GITHUB_OUTPUT
 
       # --- Step 2: PR comment using GITHUB_TOKEN ---
       - name: Post PR comment with review URL
