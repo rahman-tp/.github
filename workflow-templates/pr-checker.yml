@@ -15,7 +15,7 @@ on:
 
 jobs:
   github-pr-check:
-    runs-on: [self-hosted, acrgpu]
+    runs-on: [self-hosted, acr]
 
     steps:
       - name: Checkout
