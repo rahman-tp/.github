@@ -143,25 +143,47 @@ jobs:
           echo "run_id=$run_id" >> $GITHUB_OUTPUT
           echo "artifactDir=$artifact_dir" >> $GITHUB_OUTPUT
 
-      # --- Step 2: PR comment using GITHUB_TOKEN ---
-      - name: Post PR comment with review URL
+      # --- Step 2: Enhanced PR comment with mentions + creator ---
+      - name: Post PR comment with review URL and mentions
         if: success()
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const runId = `${{ steps.backend_call.outputs.run_id }}`;
+            const fs = require('fs');
+            const artifactDir = '${{ steps.backend_call.outputs.artifactDir }}';
+            
+            // Read reviewers and creator from artifacts
+            const reviewersRaw = fs.readFileSync(`${artifactDir}/all_reviewers.txt`, 'utf8').trim();
+            const reviewers = reviewersRaw ? reviewersRaw.split('\n').filter(r => r.trim()) : [];
+            
+            const creatorRaw = fs.readFileSync(`${artifactDir}/creator.txt`, 'utf8').trim();
+            const creator = creatorRaw && creatorRaw !== 'null' ? creatorRaw : 'Unknown';
+            
+            const runId = '${{ steps.backend_call.outputs.run_id }}';
             const reviewUrl = `https://10.100.48.16/#/pr-review/${runId}/`;
             const prNumber = context.payload.pull_request.number;
-
+            const repo = context.repo.repo;
+      
+            // Reviewer mentions
+            const reviewerMentions = reviewers.length > 0 
+              ? reviewers.map(r => `**@${r}**`).join(' ') 
+              : '**No reviewers assigned**';
+      
             const body = [
-              "**Automated PR Review** is ready!",
+              reviewerMentions,
               "",
-              `View it here: ${reviewUrl}`
+              "**🚀 Automated PR Review Ready!**",
+              "",
+              `👤 **Created by:** ${creator}`,
+              `📊 **Repo:** ${repo} #${prNumber}`,
+              `🔗 **Review:** ${reviewUrl}`,
+              "",
+              "Please review the automated analysis and provide feedback! 👇"
             ].join("\n");
-
-            core.info(`Posting PR comment to #${prNumber} with review URL: ${reviewUrl}`);
-
+      
+            core.info(`Posting enhanced PR comment to #${prNumber} - Creator: ${creator}, Reviewers: ${reviewers.length}`);
+            
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
