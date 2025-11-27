@@ -1,0 +1,258 @@
+# ---
+# name: PR Checker Workflow Template (PowerShell)
+# description: Runs internal checks on PR creation using org-wide acrgpu runner.
+# icon: check-circle
+# color: green
+# ---
+name: GitHub PR Checker
+permissions:
+  contents: read
+  pull-requests: write
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  github-pr-check:
+    runs-on: [self-hosted, acr]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- Step 0: Debug GITHUB_TOKEN (PowerShell version) ---
+      - name: Validate GITHUB_TOKEN
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if (-not $env:GITHUB_TOKEN -or $env:GITHUB_TOKEN.Trim().Length -eq 0) {
+            Write-Error "GITHUB_TOKEN is empty—check that Actions are enabled and permissions are correct."
+            exit 1
+          }
+
+          $len = $env:GITHUB_TOKEN.Length
+          Write-Host "GITHUB_TOKEN loaded (length: $len chars)"
+          $preview = $env:GITHUB_TOKEN.Substring(0,4) + '...' + $env:GITHUB_TOKEN.Substring($env:GITHUB_TOKEN.Length - 4, 4)
+          Write-Host "GITHUB_TOKEN (preview): $preview"
+
+      # --- Step 1: Build PR context + call backend (PowerShell version) ---
+      - name: Call backend and save artifacts
+        id: backend_call
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HTML_URL: ${{ github.event.pull_request.html_url }}
+          REQUESTER_LOGIN: ${{ github.event.pull_request.user.login }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          CREATOR_LOGIN: ${{ github.event.pull_request.user.login }}
+          CREATOR_EMAIL: ${{ github.event.pull_request.user.email }}
+          REQUESTED_REVIEWERS: ${{ toJson(github.event.pull_request.requested_reviewers) }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: |
+          # Optional: ignore invalid/ self-signed certs (mirror of curl -k)
+          try {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+          } catch {
+            # may not be available on some platforms, ignore if not supported
+          }
+
+          if (-not $env:PR_NUMBER -or -not $env:GITHUB_REPOSITORY -or -not $env:PR_HTML_URL) {
+            Write-Error "Missing one of: PR_NUMBER, GITHUB_REPOSITORY, PR_HTML_URL."
+            Write-Host "Values: PR_NUMBER=$($env:PR_NUMBER), GITHUB_REPOSITORY=$($env:GITHUB_REPOSITORY), PR_HTML_URL=$($env:PR_HTML_URL)"
+            exit 1
+          }
+
+          Write-Host "🔎 PR context:"
+          Write-Host "  Repo:        $($env:GITHUB_REPOSITORY)"
+          Write-Host "  PR number:   $($env:PR_NUMBER)"
+          Write-Host "  PR URL:      $($env:PR_HTML_URL)"
+          Write-Host "  Requester:   $($env:REQUESTER_LOGIN)"
+
+          $repo_link = $env:PR_HTML_URL
+
+          $creator_email = $env:CREATOR_EMAIL
+          if ([string]::IsNullOrWhiteSpace($creator_email)) {
+            $creator_email = $env:CREATOR_LOGIN
+          }
+          Write-Host "Creator email: $creator_email"
+
+          # Parse requested reviewers JSON if present
+          $reviewers_logins = @()
+          if (-not [string]::IsNullOrWhiteSpace($env:REQUESTED_REVIEWERS)) {
+            try {
+              $requested = $env:REQUESTED_REVIEWERS | ConvertFrom-Json -ErrorAction Stop
+              if ($requested -is [System.Array]) {
+                $reviewers_logins = $requested | ForEach-Object { $_.login } | Sort-Object -Unique
+              } elseif ($requested -ne $null -and $requested.login) {
+                $reviewers_logins = @($requested.login)
+              }
+            } catch {
+              Write-Warning "Failed to parse REQUESTED_REVIEWERS JSON: $_"
+            }
+          }
+
+          if ($reviewers_logins.Count -eq 0) {
+            Write-Host "Reviewer logins: None"
+          } else {
+            Write-Host "Reviewer logins:"
+            $reviewers_logins | ForEach-Object { Write-Host "  • $_" }
+          }
+
+          # Basic URL-encoding for spaces (adapt if you need full encoding)
+          $encoded_repo_link = $repo_link -replace ' ', '%20'
+          $encoded_token = $env:GITHUB_TOKEN
+          $encoded_creator_email = $creator_email -replace ' ', '%20'
+          $encoded_creator_login = $env:CREATOR_LOGIN -replace ' ', '%20'
+
+          $backend_url = 'https://10.100.48.16/api/review/git-pr/'
+          Write-Host "Sending PR details to backend at: $backend_url"
+
+          # Build form/body to post
+          $form = @{
+            repo_link = $encoded_repo_link
+            triggerPat = $encoded_token
+            r_effort = 'low'
+            email = $encoded_creator_email
+            gitUser = $encoded_creator_login
+            prtype = 'active'
+          }
+
+          try {
+            $response = Invoke-RestMethod -Uri $backend_url -Method Post -Body $form -ContentType 'multipart/form-data'
+          } catch {
+            Write-Error "Backend POST failed: $_"
+            exit 1
+          }
+
+          $raw = $response | ConvertTo-Json -Depth 10
+          Write-Host "Raw backend response: $raw"
+
+          # Parse run_id, creator and reviewers from returned object (handles null/missing)
+          $run_id = $null
+          $creator = $null
+          $reviewers = @()
+
+          if ($response -ne $null) {
+            if ($response.run_id) { $run_id = $response.run_id }
+            if ($response.prs -ne $null) {
+              if ($response.prs.developer) { $creator = $response.prs.developer }
+              if ($response.prs.reviewers) {
+                # prs.reviewers could be array
+                if ($response.prs.reviewers -is [System.Array]) {
+                  $reviewers = $response.prs.reviewers
+                } else {
+                  $reviewers = @($response.prs.reviewers)
+                }
+              }
+            }
+          }
+
+          Write-Host "Parsed run_id: $run_id"
+          Write-Host "Parsed creator: $creator"
+          if ($reviewers.Count -eq 0) {
+            Write-Host "No reviewers field found or empty in JSON."
+          } else {
+            Write-Host "Parsed reviewers:"
+            $reviewers | ForEach-Object { Write-Host "  • $_" }
+          }
+
+          if (-not $run_id) {
+            Write-Error "Missing run_id. Response:"
+            Write-Host $raw
+            exit 1
+          }
+
+          $artifact_dir = Join-Path $env:GITHUB_WORKSPACE 'artifacts'
+          New-Item -ItemType Directory -Path $artifact_dir -Force | Out-Null
+
+          # Save files (one-per-line for reviewers)
+          $run_id | Out-File -FilePath (Join-Path $artifact_dir 'run_id.txt') -Encoding utf8
+          ($creator -ne $null ? $creator : '') | Out-File -FilePath (Join-Path $artifact_dir 'creator.txt') -Encoding utf8
+          if ($reviewers.Count -gt 0) {
+            $reviewers -join "`n" | Out-File -FilePath (Join-Path $artifact_dir 'all_reviewers.txt') -Encoding utf8
+          } else {
+            "No reviewers found" | Out-File -FilePath (Join-Path $artifact_dir 'all_reviewers.txt') -Encoding utf8
+          }
+
+          Write-Host "Saved artifacts: run_id.txt, creator.txt, all_reviewers.txt"
+          Write-Host "Review URL: https://10.100.48.16/#/pr-review/$run_id/"
+
+          # Export outputs to GitHub Actions
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "run_id=$run_id"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "artifactDir=$artifact_dir"
+
+      # --- Step 2: Enhanced PR comment with mentions + creator (PowerShell) ---
+      - name: Post PR comment with review URL and mentions (PowerShell)
+        if: success()
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: |
+          $artifactDir = "${{ steps.backend_call.outputs.artifactDir }}"
+          if (-not (Test-Path $artifactDir)) {
+            Write-Error "Artifact dir not found: $artifactDir"
+            exit 1
+          }
+
+          $reviewersRaw = Get-Content -Path (Join-Path $artifactDir 'all_reviewers.txt') -ErrorAction SilentlyContinue -Raw
+          $reviewersRaw = $reviewersRaw.Trim()
+          $reviewers = @()
+          if (-not [string]::IsNullOrWhiteSpace($reviewersRaw) -and $reviewersRaw -ne 'No reviewers found') {
+            $reviewers = $reviewersRaw -split "(`r?`n)|(`n)" | Where-Object { $_.Trim().Length -gt 0 }
+          }
+
+          $creatorRaw = (Get-Content -Path (Join-Path $artifactDir 'creator.txt') -ErrorAction SilentlyContinue -Raw).Trim()
+          $creator = if ($creatorRaw -and $creatorRaw -ne 'null') { $creatorRaw } else { 'Unknown' }
+
+          $runId = '${{ steps.backend_call.outputs.run_id }}'
+          $reviewUrl = "https://10.100.48.16/#/pr-review/$runId/"
+          $prNumber = $env:PR_NUMBER
+          $parts = $env:GITHUB_REPOSITORY.Split('/')
+          $owner = $parts[0]
+          $repo = $parts[1]
+
+          if ($reviewers.Count -gt 0) {
+            $reviewerMentions = ($reviewers | ForEach-Object { "**@$($_)**" }) -join ' '
+          } else {
+            $reviewerMentions = '**No reviewers assigned**'
+          }
+
+          $bodyLines = @(
+            $reviewerMentions
+            ""
+            "**Automated PR Review Ready!**"
+            ""
+            "👥 **Created by:** $creator"
+            "**PR Number:** #$prNumber"
+            "**Repo Name:** $repo"
+            "🔗 **Review Link:** $reviewUrl"
+            ""
+            "Please review the automated analysis and provide feedback!"
+          )
+          $body = $bodyLines -join "`n"
+
+          Write-Host "Posting enhanced PR comment to #$prNumber - Creator: $creator, Reviewers: $($reviewers.Count)"
+
+          # Post comment via GitHub REST API
+          $url = "https://api.github.com/repos/$owner/$repo/issues/$prNumber/comments"
+          $headers = @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept        = "application/vnd.github+json"
+            'User-Agent'  = 'PowerShell-Invoke'
+          }
+          $payload = @{ body = $body } | ConvertTo-Json -Depth 5
+
+          try {
+            Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $payload -ContentType 'application/json'
+            Write-Host "Comment posted."
+          } catch {
+            Write-Error "Failed to post comment: $_"
+            exit 1
+          }
