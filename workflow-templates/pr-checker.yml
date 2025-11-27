@@ -69,7 +69,7 @@ jobs:
 
           creator_email="$CREATOR_EMAIL"
           if [ -z "$creator_email" ]; then
-            creator_email="${CREATOR_LOGIN}@github.local"
+            creator_email="${CREATOR_LOGIN}"
           fi
 
           echo "👤 Creator email: $creator_email"
