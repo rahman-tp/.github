@@ -27,13 +27,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -z "$GITHUB_TOKEN" ]; then
-            echo "❌ GITHUB_TOKEN is empty—check that Actions are enabled and permissions are correct."
+            echo "GITHUB_TOKEN is empty—check that Actions are enabled and permissions are correct."
             exit 1
           fi
 
-          echo "🔑 GITHUB_TOKEN loaded (length: ${#GITHUB_TOKEN} chars)"
+          echo "GITHUB_TOKEN loaded (length: ${#GITHUB_TOKEN} chars)"
           preview="${GITHUB_TOKEN:0:4}...${GITHUB_TOKEN: -4}"
-          echo "🔐 GITHUB_TOKEN (preview): $preview"
+          echo "GITHUB_TOKEN (preview): $preview"
 
       # --- Step 1: Build PR context + call backend (bash version) ---
       - name: Call backend and save artifacts
@@ -54,7 +54,7 @@ jobs:
         run: |
           # Check required context variables
           if [ -z "$PR_NUMBER" ] || [ -z "$GITHUB_REPOSITORY" ] || [ -z "$PR_HTML_URL" ]; then
-            echo "❌ Missing one of: PR_NUMBER, GITHUB_REPOSITORY, PR_HTML_URL."
+            echo "Missing one of: PR_NUMBER, GITHUB_REPOSITORY, PR_HTML_URL."
             echo "Values: PR_NUMBER=$PR_NUMBER, GITHUB_REPOSITORY=$GITHUB_REPOSITORY, PR_HTML_URL=$PR_HTML_URL"
             exit 1
           fi
@@ -72,14 +72,14 @@ jobs:
             creator_email="${CREATOR_LOGIN}"
           fi
 
-          echo "👤 Creator email: $creator_email"
+          echo "Creator email: $creator_email"
 
           # Extract reviewer logins from JSON array
           reviewers_logins=$(echo "$REQUESTED_REVIEWERS" | jq -r '.[].login' 2>/dev/null | sort -u)
           if [ -z "$reviewers_logins" ]; then
-            echo "👥 Reviewer logins: None"
+            echo "Reviewer logins: None"
           else
-            echo "👥 Reviewer logins:"
+            echo "Reviewer logins:"
             echo "$reviewers_logins" | while read -r reviewer; do
               echo "  • $reviewer"
             done
@@ -92,7 +92,7 @@ jobs:
           encoded_creator_login="${CREATOR_LOGIN// /%20}"
 
           backend_url='https://10.100.48.16/api/review/git-pr/'
-          echo "📨 Sending PR details to backend at: $backend_url"
+          echo "Sending PR details to backend at: $backend_url"
 
           # Send POST request with form data to backend
           result=$(curl -k -X POST -sS \
@@ -104,7 +104,7 @@ jobs:
             -F "prtype=active" \
             "$backend_url")
 
-          echo "🌐 Raw backend response: $result"
+          echo "Raw backend response: $result"
           
           # Parse JSON response with debug output
           run_id=$(echo "$result" | jq -r '.run_id' 2>/dev/null)
@@ -125,7 +125,7 @@ jobs:
           
           # Validate run_id presence
           if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-            echo "⚠️ Missing run_id. Response:"
+            echo " Missing run_id. Response:"
             echo "$result"
             exit 1
           fi
@@ -137,8 +137,8 @@ jobs:
           echo "$creator" > "$artifact_dir/creator.txt"
           echo "$reviewers" > "$artifact_dir/all_reviewers.txt"
 
-          echo "✅ Saved artifacts: run_id.txt, creator.txt, all_reviewers.txt"
-          echo "🎉 Review URL: https://10.100.48.16/#/pr-review/$run_id/"
+          echo "Saved artifacts: run_id.txt, creator.txt, all_reviewers.txt"
+          echo "Review URL: https://10.100.48.16/#/pr-review/$run_id/"
 
           echo "run_id=$run_id" >> $GITHUB_OUTPUT
           echo "artifactDir=$artifact_dir" >> $GITHUB_OUTPUT
@@ -173,13 +173,14 @@ jobs:
             const body = [
               reviewerMentions,
               "",
-              "**🚀 Automated PR Review Ready!**",
+              "**Automated PR Review Ready!**",
               "",
-              `👤 **Created by:** ${creator}`,
-              `📊 **PR Number:** ${repo} #${prNumber}`,
+              `👥 **Created by:** ${creator}`,
+              `**PR Number:** #${prNumber}`,
+              `**Repo Name:** ${repo}`,
               `🔗 **Review Link:** ${reviewUrl}`,
               "",
-              "Please review the automated analysis and provide feedback! 👇"
+              "Please review the automated analysis and provide feedback!"
             ].join("\n");
       
             core.info(`Posting enhanced PR comment to #${prNumber} - Creator: ${creator}, Reviewers: ${reviewers.length}`);
