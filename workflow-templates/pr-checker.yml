@@ -17,8 +17,6 @@ jobs:
     runs-on: [self-hosted, acr]
 
     steps:
-      # - name: Install jq
-      #   run: sudo apt-get update && sudo apt-get install -y jq
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -71,7 +69,7 @@ jobs:
 
           creator_email="$CREATOR_EMAIL"
           if [ -z "$creator_email" ]; then
-            creator_email="${CREATOR_LOGIN}"
+            creator_email="${CREATOR_LOGIN}@github.local"
           fi
 
           echo "👤 Creator email: $creator_email"
@@ -93,7 +91,7 @@ jobs:
           encoded_creator_email="${creator_email// /%20}"
           encoded_creator_login="${CREATOR_LOGIN// /%20}"
 
-          backend_url='https://10.100.48.16/api/review/git-pr/'
+          backend_url='https://10.100.48.16/api/review/github-pr/'
           echo "📨 Sending PR details to backend at: $backend_url"
 
           # Send POST request with form data to backend
@@ -107,12 +105,25 @@ jobs:
             "$backend_url")
 
           echo "🌐 Raw backend response: $result"
-
-          # Parse JSON response
+          
+          # Parse JSON response with debug output
           run_id=$(echo "$result" | jq -r '.run_id' 2>/dev/null)
-          creator=$(echo "$result" | jq -r '.developer' 2>/dev/null)
-          reviewers=$(echo "$result" | jq -r '.reviewers | join("\n")' 2>/dev/null)
-
+          echo "Parsed run_id: $run_id"
+          
+          creator=$(echo "$result" | jq -r '.prs.developer' 2>/dev/null)
+          echo "Parsed creator: $creator"
+          
+          # Parse reviewers safely; if empty or null, set a default message
+          reviewers=$(echo "$result" | jq -r '.prs.reviewers | join("\n")' 2>/dev/null)
+          if [ -z "$reviewers" ] || [ "$reviewers" = "null" ]; then
+            echo "No reviewers field found or empty in JSON."
+            reviewers="No reviewers found"
+          else
+            echo "Parsed reviewers:"
+            echo "$reviewers"
+          fi
+          
+          # Validate run_id presence
           if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
             echo "⚠️ Missing run_id. Response:"
             echo "$result"
@@ -127,7 +138,7 @@ jobs:
           echo "$reviewers" > "$artifact_dir/all_reviewers.txt"
 
           echo "✅ Saved artifacts: run_id.txt, creator.txt, all_reviewers.txt"
-          echo "🎉 Review URL: https://10.100.48.16/#/git-pr/$run_id/"
+          echo "🎉 Review URL: https://10.100.48.16/#/pr-review/$run_id/"
 
           echo "run_id=$run_id" >> $GITHUB_OUTPUT
           echo "artifactDir=$artifact_dir" >> $GITHUB_OUTPUT
@@ -140,7 +151,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const runId = `${{ steps.backend_call.outputs.run_id }}`;
-            const reviewUrl = `https://10.100.48.16/#/git-pr/${runId}/`;
+            const reviewUrl = `https://10.100.48.16/#/pr-review/${runId}/`;
             const prNumber = context.payload.pull_request.number;
 
             const body = [
