@@ -176,8 +176,8 @@ jobs:
               "**🚀 Automated PR Review Ready!**",
               "",
               `👤 **Created by:** ${creator}`,
-              `📊 **Repo:** ${repo} #${prNumber}`,
-              `🔗 **Review:** ${reviewUrl}`,
+              `📊 **PR Number:** ${repo} #${prNumber}`,
+              `🔗 **Review Link:** ${reviewUrl}`,
               "",
               "Please review the automated analysis and provide feedback! 👇"
             ].join("\n");
