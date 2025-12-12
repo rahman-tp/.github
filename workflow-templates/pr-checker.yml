@@ -106,7 +106,7 @@ jobs:
           result=$(curl -k -X POST -sS \
             -F "repo_link=$encoded_repo_link" \
             -F "triggerPat=$encoded_token" \
-            -F "r_effort=low" \
+            -F "r_effort=high" \
             -F "email=$encoded_creator_email" \
             -F "gitUser=$encoded_creator_login" \
             -F "prtype=active" \
@@ -290,14 +290,14 @@ jobs:
           $encoded_creator_email = $creator_email -replace ' ', '%20'
           $encoded_creator_login = $env:CREATOR_LOGIN -replace ' ', '%20'
 
-          $backend_url = 'https://10.100.48.16/api/review/git-pr/'
+          $backend_url = 'https://10.98.0.97/api/review/git-pr/'
           Write-Host "Sending PR details to backend at: $backend_url"
 
           # Build form/body to post
           $form = @{
             repo_link = $encoded_repo_link
             triggerPat = $encoded_token
-            r_effort = 'low'
+            r_effort = 'high'
             email = $encoded_creator_email
             gitUser = $encoded_creator_login
             prtype = 'active'
@@ -361,7 +361,7 @@ jobs:
           }
 
           Write-Host "Saved artifacts: run_id.txt, creator.txt, all_reviewers.txt"
-          Write-Host "Review URL: https://10.100.48.16/#/pr-review/$run_id/"
+          Write-Host "Review URL: https://10.98.0.97/#/pr-review/$run_id/"
 
           # Export outputs to GitHub Actions
           Add-Content -Path $env:GITHUB_OUTPUT -Value "run_id=$run_id"
@@ -394,7 +394,7 @@ jobs:
           $creator = if ($creatorRaw -and $creatorRaw -ne 'null') { $creatorRaw } else { 'Unknown' }
 
           $runId = '${{ steps.backend_call_windows.outputs.run_id }}'
-          $reviewUrl = "https://10.100.48.16/#/pr-review/$runId/"
+          $reviewUrl = "https://10.98.0.97/#/pr-review/$runId/"
           $prNumber = $env:PR_NUMBER
           $parts = $env:GITHUB_REPOSITORY.Split('/')
           $owner = $parts[0]
